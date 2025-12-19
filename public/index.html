@@ -1395,6 +1395,24 @@
             transform: translateY(-3px);
             box-shadow: 0 10px 30px rgba(0, 212, 170, 0.4);
         }
+
+        /* ===== BACKGROUND TIMER INDICATOR ===== */
+        .background-timer-indicator {
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            background: var(--accent-blue);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 15px;
+            font-size: 12px;
+            font-weight: 600;
+            z-index: 9999;
+            display: none;
+            align-items: center;
+            gap: 5px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+        }
     </style>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
@@ -1433,6 +1451,12 @@
                 HISTORY
             </button>
         </div>
+    </div>
+
+    <!-- BACKGROUND TIMER INDICATOR -->
+    <div class="background-timer-indicator" id="backgroundTimerIndicator">
+        <i class="fas fa-clock"></i>
+        <span id="backgroundTimerText">Timer Running</span>
     </div>
 
     <!-- SIDEBAR TOGGLE BUTTONS -->
@@ -1534,7 +1558,7 @@
                 </div>
 
                 <div style="text-align: center; margin-top: 20px; color: var(--text-dim); font-size: 13px;">
-                    <i class="fas fa-info-circle"></i> Timer auto-saves every 30 seconds
+                    <i class="fas fa-info-circle"></i> Timer works in background tabs
                 </div>
             </div>
 
@@ -1698,13 +1722,16 @@
                 active: false,
                 duration: 1500,
                 remaining: 1500,
-                interval: null,
+                animationFrame: null,
                 selectedMinutes: 25,
                 startTime: null,
                 endTime: null,
                 isBreak: false,
                 timerEndSoundPlaying: false,
-                autoStop: false
+                autoStop: false,
+                lastUpdateTime: null,
+                originalDuration: 1500,
+                lastSavedRemaining: 1500
             },
             todos: [],
             timeSlots: [],
@@ -1731,7 +1758,7 @@
                 autoStopTimer: false
             },
             metadata: {
-                version: '3.2',
+                version: '3.3',
                 deviceId: null,
                 created: new Date().toISOString(),
                 lastSave: null
@@ -1774,7 +1801,9 @@
             sidebarLeft: document.getElementById('sidebarLeft'),
             sidebarRight: document.getElementById('sidebarRight'),
             leftSidebarToggle: document.getElementById('leftSidebarToggle'),
-            rightSidebarToggle: document.getElementById('rightSidebarToggle')
+            rightSidebarToggle: document.getElementById('rightSidebarToggle'),
+            backgroundTimerIndicator: document.getElementById('backgroundTimerIndicator'),
+            backgroundTimerText: document.getElementById('backgroundTimerText')
         };
 
         // ===== AUDIO MANAGEMENT =====
@@ -1944,9 +1973,253 @@
             resetTimer();
         }
 
+        // ===== RELIABLE TIMER USING REQUESTANIMATIONFRAME =====
+        function updateTimerDisplay() {
+            const minutes = Math.floor(state.timer.remaining / 60);
+            const seconds = state.timer.remaining % 60;
+            elements.timerDisplay.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+            
+            // Update background timer indicator
+            if (state.timer.active) {
+                elements.backgroundTimerText.textContent = `${minutes}:${seconds.toString().padStart(2, '0')} ${state.timer.isBreak ? '(Break)' : '(Focus)'}`;
+                elements.backgroundTimerIndicator.style.display = 'flex';
+            } else {
+                elements.backgroundTimerIndicator.style.display = 'none';
+            }
+            
+            if (state.timer.active) {
+                elements.timerDisplay.classList.add('active');
+                elements.timerDisplay.style.color = state.timer.isBreak ? 'var(--accent-yellow)' : 'var(--accent-green)';
+            } else {
+                elements.timerDisplay.classList.remove('active');
+                elements.timerDisplay.style.color = '';
+            }
+        }
+
+        function startTimer() {
+            if (state.timer.active) return;
+            
+            state.timer.active = true;
+            state.timer.autoStop = false;
+            state.timer.startTime = new Date().toISOString();
+            state.timer.lastUpdateTime = Date.now();
+            state.timer.lastSavedRemaining = state.timer.remaining;
+            
+            // Show background timer indicator
+            elements.backgroundTimerIndicator.style.display = 'flex';
+            
+            // Start reliable timer using requestAnimationFrame
+            const timerStep = () => {
+                if (!state.timer.active) return;
+                
+                const currentTime = Date.now();
+                const elapsedSeconds = Math.floor((currentTime - state.timer.lastUpdateTime) / 1000);
+                
+                if (elapsedSeconds >= 1) {
+                    state.timer.remaining -= elapsedSeconds;
+                    state.timer.lastUpdateTime = currentTime;
+                    
+                    updateTimerDisplay();
+                    
+                    if (state.timer.remaining <= 0) {
+                        completeTimer();
+                        return;
+                    }
+                    
+                    if (state.timer.isBreak && state.timer.remaining === 10) {
+                        playBreakSound();
+                    }
+                    
+                    // Auto-save every 30 seconds
+                    if (state.timer.remaining % 30 === 0) {
+                        saveState();
+                    }
+                }
+                
+                // Continue the timer loop
+                state.timer.animationFrame = requestAnimationFrame(timerStep);
+            };
+            
+            // Start the timer loop
+            state.timer.animationFrame = requestAnimationFrame(timerStep);
+            
+            if (state.timer.isBreak) {
+                state.stats.breakSessions++;
+                showNotification('☕ Break Started - Relax and recharge!', 'success');
+            } else {
+                state.stats.focusSessions++;
+                showNotification('▶️ Timer Started - Focus Mode Activated!', 'success');
+            }
+            
+            updateStats();
+            saveState();
+        }
+
+        function pauseTimer() {
+            if (!state.timer.active) return;
+            
+            state.timer.active = false;
+            if (state.timer.animationFrame) {
+                cancelAnimationFrame(state.timer.animationFrame);
+                state.timer.animationFrame = null;
+            }
+            
+            // Hide background timer indicator
+            elements.backgroundTimerIndicator.style.display = 'none';
+            
+            updateTimerDisplay();
+            
+            showNotification('⏸️ Timer Paused', 'info');
+            saveState();
+        }
+
+        function resetTimer() {
+            state.timer.active = false;
+            state.timer.isBreak = false;
+            
+            if (state.timer.animationFrame) {
+                cancelAnimationFrame(state.timer.animationFrame);
+                state.timer.animationFrame = null;
+            }
+            
+            // Hide background timer indicator
+            elements.backgroundTimerIndicator.style.display = 'none';
+            
+            state.timer.remaining = state.timer.originalDuration || (state.timer.selectedMinutes * 60);
+            state.timer.lastSavedRemaining = state.timer.remaining;
+            elements.timerDisplay.classList.remove('blinking');
+            updateTimerDisplay();
+            
+            showNotification('🔄 Timer Reset', 'info');
+        }
+
+        function completeTimer() {
+            state.timer.active = false;
+            state.timer.endTime = new Date().toISOString();
+            
+            if (state.timer.animationFrame) {
+                cancelAnimationFrame(state.timer.animationFrame);
+                state.timer.animationFrame = null;
+            }
+            
+            // Hide background timer indicator
+            elements.backgroundTimerIndicator.style.display = 'none';
+            
+            elements.timerDisplay.classList.add('blinking');
+            playTimerEndSound();
+            
+            if (state.timer.isBreak) {
+                const breakHours = state.timer.selectedMinutes / 60;
+                state.stats.todayBreaks += breakHours;
+            } else {
+                const hours = state.timer.selectedMinutes / 60;
+                state.stats.totalProductiveHours += hours;
+                state.stats.todayHours += hours;
+            }
+            
+            updateStats();
+            updateProgressBar();
+            
+            // Send notification if permission granted
+            if (state.settings.notifications && Notification.permission === 'granted') {
+                const title = state.timer.isBreak ? 'Break Complete!' : 'Focus Session Complete!';
+                const body = state.timer.isBreak ? 
+                    `You've taken a ${state.timer.selectedMinutes} minute break.` :
+                    `Great work! You've completed ${state.timer.selectedMinutes} minutes of focused work.`;
+                
+                new Notification(title, { body: body });
+            }
+            
+            state.timer.isBreak = false;
+            state.timer.autoStop = true;
+            saveState();
+        }
+
+        function takeBreak(minutes) {
+            // Set the correct pill as active
+            const pills = document.querySelectorAll('.timer-pill');
+            pills.forEach(pill => {
+                pill.classList.remove('active');
+                if (parseInt(pill.dataset.minutes) === minutes) {
+                    pill.classList.add('active');
+                }
+            });
+            
+            state.timer.selectedMinutes = minutes;
+            state.timer.duration = minutes * 60;
+            state.timer.remaining = minutes * 60;
+            state.timer.originalDuration = minutes * 60;
+            state.timer.lastSavedRemaining = state.timer.remaining;
+            state.timer.isBreak = true;
+            updateTimerDisplay();
+            
+            showNotification(`☕ ${minutes} minute break started! Relax and recharge.`, 'success');
+            
+            if (state.timer.active) {
+                pauseTimer();
+                setTimeout(() => {
+                    startTimer();
+                }, 100);
+            } else {
+                startTimer();
+            }
+        }
+
+        // ===== VISIBILITY CHANGE HANDLER =====
+        function handleVisibilityChange() {
+            if (!state.timer.active) return;
+            
+            if (document.hidden) {
+                // Tab is now hidden - timer is still running
+                console.log('Tab hidden, timer continues in background');
+            } else {
+                // Tab is now visible - recalculate timer
+                if (state.timer.lastUpdateTime) {
+                    const currentTime = Date.now();
+                    const elapsedSeconds = Math.floor((currentTime - state.timer.lastUpdateTime) / 1000);
+                    
+                    if (elapsedSeconds > 0) {
+                        state.timer.remaining -= elapsedSeconds;
+                        state.timer.lastUpdateTime = currentTime;
+                        
+                        updateTimerDisplay();
+                        
+                        if (state.timer.remaining <= 0) {
+                            completeTimer();
+                        } else {
+                            // Restart timer loop if it's still running
+                            if (state.timer.active && !state.timer.animationFrame) {
+                                const timerStep = () => {
+                                    if (!state.timer.active) return;
+                                    
+                                    const currentTime = Date.now();
+                                    const elapsedSeconds = Math.floor((currentTime - state.timer.lastUpdateTime) / 1000);
+                                    
+                                    if (elapsedSeconds >= 1) {
+                                        state.timer.remaining -= elapsedSeconds;
+                                        state.timer.lastUpdateTime = currentTime;
+                                        
+                                        updateTimerDisplay();
+                                        
+                                        if (state.timer.remaining <= 0) {
+                                            completeTimer();
+                                            return;
+                                        }
+                                    }
+                                    
+                                    state.timer.animationFrame = requestAnimationFrame(timerStep);
+                                };
+                                state.timer.animationFrame = requestAnimationFrame(timerStep);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         // ===== INITIALIZATION =====
         function init() {
-            console.log('🚀 FlowState Pro v3.2 Initializing...');
+            console.log('🚀 FlowState Pro v3.3 Initializing...');
             loadState();
             initAudio();
             initializeUI();
@@ -1954,32 +2227,114 @@
             initializeToday();
             checkMidnightCleanup();
             
+            // Request notification permission
             if (state.settings.notifications && Notification.permission === 'default') {
                 Notification.requestPermission();
             }
             
-            showNotification('🎯 FlowState Pro v3.2 Loaded Successfully!', 'success');
-            console.log('✅ FlowState Pro initialized');
+            // Add visibility change listener
+            document.addEventListener('visibilitychange', handleVisibilityChange);
+            
+            showNotification('🎯 FlowState Pro v3.3 Loaded Successfully!', 'success');
+            console.log('✅ FlowState Pro initialized with reliable timer');
         }
 
-        // ===== STATE MANAGEMENT =====
+        // ===== STATE MANAGEMENT - FIXED TIMER CONTINUATION =====
         function loadState() {
             try {
                 const saved = localStorage.getItem('flowstate_pro_complete');
                 if (saved) {
                     const parsed = JSON.parse(saved);
+                    
+                    // Merge saved state with defaults
                     state = {
                         ...state,
                         ...parsed,
                         timer: {
                             ...state.timer,
                             ...parsed.timer,
-                            active: false,
-                            interval: null,
-                            timerEndSoundPlaying: false
+                            // Reset these for safety
+                            animationFrame: null,
+                            timerEndSoundPlaying: false,
+                            lastUpdateTime: parsed.timer?.lastUpdateTime ? 
+                                new Date(parsed.timer.lastUpdateTime).getTime() : null
                         },
                         activities: parsed.activities || {}
                     };
+                    
+                    // FIXED: Correct timer continuation from exact remaining time
+                    if (parsed.timer && parsed.timer.active && parsed.timer.lastUpdateTime) {
+                        const savedLastUpdateTime = new Date(parsed.timer.lastUpdateTime).getTime();
+                        const now = Date.now();
+                        const elapsedSeconds = Math.floor((now - savedLastUpdateTime) / 1000);
+                        
+                        // Calculate remaining time based on elapsed time since last update
+                        const savedRemaining = parsed.timer.remaining || parsed.timer.duration;
+                        const calculatedRemaining = Math.max(0, savedRemaining - elapsedSeconds);
+                        
+                        // Update the timer state
+                        state.timer.remaining = calculatedRemaining;
+                        state.timer.lastUpdateTime = now;
+                        state.timer.lastSavedRemaining = calculatedRemaining;
+                        
+                        if (calculatedRemaining > 0) {
+                            // Timer should resume automatically
+                            state.timer.active = true;
+                            
+                            // Make sure the correct pill is selected
+                            const minutes = state.timer.selectedMinutes;
+                            const pills = document.querySelectorAll('.timer-pill');
+                            pills.forEach(pill => {
+                                pill.classList.remove('active');
+                                if (parseInt(pill.dataset.minutes) === minutes) {
+                                    pill.classList.add('active');
+                                }
+                            });
+                            
+                            // Show notification about resumed timer
+                            const remainingMinutes = Math.floor(calculatedRemaining / 60);
+                            const remainingSeconds = calculatedRemaining % 60;
+                            const timerType = state.timer.isBreak ? 'Break' : 'Focus';
+                            showNotification(`⏱️ ${timerType} timer resumed: ${remainingMinutes}:${remainingSeconds.toString().padStart(2, '0')} remaining`, 'info');
+                            
+                            // Start the timer again
+                            const timerStep = () => {
+                                if (!state.timer.active) return;
+                                
+                                const currentTime = Date.now();
+                                const elapsedSeconds = Math.floor((currentTime - state.timer.lastUpdateTime) / 1000);
+                                
+                                if (elapsedSeconds >= 1) {
+                                    state.timer.remaining -= elapsedSeconds;
+                                    state.timer.lastUpdateTime = currentTime;
+                                    
+                                    updateTimerDisplay();
+                                    
+                                    if (state.timer.remaining <= 0) {
+                                        completeTimer();
+                                        return;
+                                    }
+                                }
+                                
+                                state.timer.animationFrame = requestAnimationFrame(timerStep);
+                            };
+                            state.timer.animationFrame = requestAnimationFrame(timerStep);
+                            
+                            // Show background timer indicator
+                            elements.backgroundTimerIndicator.style.display = 'flex';
+                            updateTimerDisplay();
+                        } else {
+                            // Timer was already finished
+                            state.timer.remaining = state.timer.selectedMinutes * 60;
+                            state.timer.isBreak = false;
+                            state.timer.active = false;
+                            state.timer.lastSavedRemaining = state.timer.remaining;
+                        }
+                    } else if (parsed.timer && parsed.timer.remaining) {
+                        // If timer wasn't active but has remaining time, restore it
+                        state.timer.remaining = parsed.timer.remaining;
+                        state.timer.lastSavedRemaining = parsed.timer.remaining;
+                    }
                     
                     if (!state.metadata.deviceId) {
                         state.metadata.deviceId = 'device_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
@@ -1998,7 +2353,27 @@
             if (!state.settings.autoSave) return;
             
             try {
+                // Update timer state before saving
+                if (state.timer.active && state.timer.lastUpdateTime) {
+                    const currentTime = Date.now();
+                    const elapsedSeconds = Math.floor((currentTime - state.timer.lastUpdateTime) / 1000);
+                    
+                    if (elapsedSeconds >= 1) {
+                        state.timer.remaining -= elapsedSeconds;
+                        state.timer.lastUpdateTime = currentTime;
+                        state.timer.lastSavedRemaining = state.timer.remaining;
+                        updateTimerDisplay();
+                        
+                        // Check if timer completed during save
+                        if (state.timer.remaining <= 0) {
+                            completeTimer();
+                        }
+                    }
+                }
+                
                 state.metadata.lastSave = new Date().toISOString();
+                
+                // Save current state before saving
                 updateTodayHistory();
                 cleanupOldHistory();
                 
@@ -2123,6 +2498,8 @@
         }
 
         // ===== MIDNIGHT CLEANUP - FIXED =====
+        let midnightCleanupDone = false;
+
         function checkMidnightCleanup() {
             const now = new Date();
             const hours = now.getHours();
@@ -2131,13 +2508,13 @@
             
             // Check if it's exactly midnight (00:00:00 - 00:00:10)
             if (hours === 0 && minutes === 0 && seconds < 10) {
-                if (!state.midnightCleanupDone) {
+                if (!midnightCleanupDone) {
                     cleanupCompletedTasks();
-                    state.midnightCleanupDone = true;
+                    midnightCleanupDone = true;
                     
                     // Reset flag after 1 minute
                     setTimeout(() => {
-                        state.midnightCleanupDone = false;
+                        midnightCleanupDone = false;
                     }, 60000);
                 }
             }
@@ -2176,141 +2553,6 @@
             
             console.log('🧹 Midnight cleanup: Completed ' + totalCompleted + ' tasks removed');
             showNotification('🧹 Midnight cleanup: ' + totalCompleted + ' completed tasks removed', 'info');
-        }
-
-        // ===== TIMER FUNCTIONS - FIXED BREAK TRACKING =====
-        function updateTimerDisplay() {
-            const minutes = Math.floor(state.timer.remaining / 60);
-            const seconds = state.timer.remaining % 60;
-            elements.timerDisplay.textContent = `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
-            
-            if (state.timer.active) {
-                elements.timerDisplay.classList.add('active');
-                elements.timerDisplay.style.color = state.timer.isBreak ? 'var(--accent-yellow)' : 'var(--accent-green)';
-            } else {
-                elements.timerDisplay.classList.remove('active');
-                elements.timerDisplay.style.color = '';
-            }
-        }
-
-        function startTimer() {
-            if (state.timer.active) return;
-            
-            state.timer.active = true;
-            state.timer.autoStop = false;
-            state.timer.startTime = new Date().toISOString();
-            state.timer.interval = setInterval(() => {
-                state.timer.remaining--;
-                updateTimerDisplay();
-                
-                if (state.timer.remaining <= 0) {
-                    completeTimer();
-                }
-                
-                if (state.timer.isBreak && state.timer.remaining === 10) {
-                    playBreakSound();
-                }
-                
-                if (state.timer.remaining % 60 === 0) {
-                    saveState();
-                }
-            }, 1000);
-            
-            // CORRECTED: Only increment breakSessions for breaks, focusSessions for focus
-            if (state.timer.isBreak) {
-                state.stats.breakSessions++;
-                showNotification('☕ Break Started - Relax and recharge!', 'success');
-            } else {
-                state.stats.focusSessions++;
-                showNotification('▶️ Timer Started - Focus Mode Activated!', 'success');
-            }
-            
-            updateStats();
-            saveState();
-        }
-
-        function pauseTimer() {
-            if (!state.timer.active) return;
-            
-            state.timer.active = false;
-            clearInterval(state.timer.interval);
-            state.timer.interval = null;
-            updateTimerDisplay();
-            
-            showNotification('⏸️ Timer Paused', 'info');
-            saveState();
-        }
-
-        function resetTimer() {
-            state.timer.active = false;
-            state.timer.isBreak = false;
-            clearInterval(state.timer.interval);
-            state.timer.interval = null;
-            state.timer.remaining = state.timer.selectedMinutes * 60;
-            elements.timerDisplay.classList.remove('blinking');
-            updateTimerDisplay();
-            
-            showNotification('🔄 Timer Reset', 'info');
-        }
-
-        function completeTimer() {
-            state.timer.active = false;
-            state.timer.endTime = new Date().toISOString();
-            clearInterval(state.timer.interval);
-            state.timer.interval = null;
-            
-            elements.timerDisplay.classList.add('blinking');
-            playTimerEndSound();
-            
-            if (state.timer.isBreak) {
-                const breakHours = state.timer.selectedMinutes / 60;
-                state.stats.todayBreaks += breakHours;
-                // CORRECTED: Break sessions already incremented in startTimer
-            } else {
-                const hours = state.timer.selectedMinutes / 60;
-                state.stats.totalProductiveHours += hours;
-                state.stats.todayHours += hours;
-                // CORRECTED: Focus sessions already incremented in startTimer
-            }
-            
-            updateStats();
-            updateProgressBar();
-            
-            if (state.settings.notifications && Notification.permission === 'granted') {
-                const title = state.timer.isBreak ? 'Break Complete!' : 'Focus Session Complete!';
-                const body = state.timer.isBreak ? 
-                    `You've taken a ${state.timer.selectedMinutes} minute break.` :
-                    `Great work! You've completed ${state.timer.selectedMinutes} minutes of focused work.`;
-                
-                new Notification(title, { body: body });
-            }
-            
-            state.timer.isBreak = false;
-            state.timer.autoStop = true;
-            saveState();
-        }
-
-        function takeBreak(minutes) {
-            const pills = document.querySelectorAll('.timer-pill');
-            pills.forEach(pill => {
-                pill.classList.remove('active');
-                if (parseInt(pill.dataset.minutes) === minutes) {
-                    pill.classList.add('active');
-                }
-            });
-            
-            state.timer.selectedMinutes = minutes;
-            state.timer.duration = minutes * 60;
-            state.timer.remaining = minutes * 60;
-            state.timer.isBreak = true;
-            updateTimerDisplay();
-            
-            showNotification(`☕ ${minutes} minute break started! Relax and recharge.`, 'success');
-            
-            if (state.timer.active) {
-                resetTimer();
-            }
-            startTimer();
         }
 
         // ===== TASK FUNCTIONS =====
@@ -2521,7 +2763,7 @@
             }
         }
 
-        // ===== 24-HOUR TIME SCHEDULE FUNCTIONS - FIXED SCROLLING =====
+        // ===== 24-HOUR TIME SCHEDULE FUNCTIONS =====
         function generateTimeSlots() {
             elements.timeSchedule.innerHTML = '';
             
@@ -2872,7 +3114,7 @@
             }
         }
 
-        // ===== CURRENT TIME LINE & JUMP TO NOW - FIXED SCROLLING =====
+        // ===== CURRENT TIME LINE & JUMP TO NOW =====
         function updateCurrentTimeLine() {
             const now = new Date();
             const currentHour = now.getHours();
@@ -3224,7 +3466,7 @@
         function exportAllData() {
             const exportData = {
                 app: 'FlowState Pro',
-                version: '3.2',
+                version: '3.3',
                 exportDate: new Date().toISOString(),
                 state: state,
                 dailyHistory: state.dailyHistory,
@@ -3370,6 +3612,8 @@
                     state.timer.selectedMinutes = minutes;
                     state.timer.duration = minutes * 60;
                     state.timer.remaining = minutes * 60;
+                    state.timer.originalDuration = minutes * 60;
+                    state.timer.lastSavedRemaining = minutes * 60;
                     state.timer.isBreak = false;
                     updateTimerDisplay();
                     saveState();
@@ -3382,6 +3626,8 @@
                 state.timer.selectedMinutes = minutes;
                 state.timer.duration = minutes * 60;
                 state.timer.remaining = minutes * 60;
+                state.timer.originalDuration = minutes * 60;
+                state.timer.lastSavedRemaining = minutes * 60;
             }
             
             updateCurrentTime();
